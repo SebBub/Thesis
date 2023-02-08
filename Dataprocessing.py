@@ -5,74 +5,45 @@ from tqdm import tqdm
 from climpred.preprocessing.shared import set_integer_time_axis
 import numpy as np
 
+# Private helper functions
+def _make_dir(path, to_netcdf):
+    if to_netcdf and not path.exists():
+        path.mkdir()
+        logging.info(f"Created directory {path} \n")
 
-def get_daily_tp_rate(path, outfolder, globpat=None, var="tp"):
-    path = Path(path)
-    outfolder = Path(outfolder)
 
-    if not outfolder.exists():
-        outfolder.mkdir()
-
-    dataarrays = []
-
-    if (globpat == None):  # single file
-        da = xr.open_dataset(path, chunks="auto")[var]
-        dataarrays.append(da)
-
-    else:  # list of files
-        files = list(path.glob(globpat))
-        logging.info(f"Reading {len(files)} files into memory:")
-        for file in tqdm(files):
-            da = xr.open_dataset(file, chunks="auto")[var]
-            dataarrays.append(da)
-
-    logging.info(f"\n Processing {len(dataarrays)} DataArrays:")
-    for c, dataarray in enumerate(tqdm(dataarrays)):  # see https://confluence.ecmwf.int/pages/viewpage.action?pageId=197702790
-        attrs = dataarray.attrs
-        da = dataarray.diff("time") # attrs are dropped
-        da.attrs = attrs
-        da = xr.concat([dataarray.isel({"time":0}), da], dim="time")
-        da.to_netcdf(outfolder / (files[c].parts[-1][:-3] + "_disaggregated.nc"))
-
-def crop_netCDF(path, lat1, lat2, lon1, lon2, globpat=None, to_netcdf=False):
+def crop_netCDF(path, lat1, lat2, lon1, lon2, globpat=None, to_netcdf=False, var="tp"):
     """
     Check sign of lat increment in latlon grid before (see below!)
+    """
     # TODO: first check if the files to be cropped are already stored in cropped_path
 
-    :param path:
-    :param lat1:
-    :param lat2:
-    :param lon1:
-    :param lon2:
-    :param globpat:
-    :param to_netcdf:
-    :return:
-    """
     x_slice = slice(lon1, lon2)
-    y_slice = slice(lat2, lat1)  # ! reversed order because ERA5 has
-    # negative y-increment, check before
+    y_slice = slice(lat2, lat1)  # ! reversed order because ERA5 has negative y-increment, check before
 
     path = Path(path)
-    cropped_path = path / "Cropped"
+    datasets = []  # empty list to store dataset(s) before cropping
 
-    if to_netcdf and not cropped_path.exists():
-        cropped_path.mkdir()
-        logging.info(f"Created directory {cropped_path} \n")
+    if globpat == None:  # single file provided
+        cropped_path = path.parent / "Cropped"
+        _make_dir(cropped_path, to_netcdf)
 
-    datasets = []
-    if globpat == None:  # single file
         ds = xr.open_dataset(path, chunks="auto")
+        ds[var].encoding = {}  # delete encoing information before writing to_netcdf, now write uncompressed!
         datasets.append(ds)
 
-    else:  # note: open_mfdataset() does not work because no monotonic indexes to concatenate along for SEAS5 hindcasts -> use loop
+    else:  # folder with multiple files provided
+        cropped_path = path / "Cropped"
+        _make_dir(cropped_path, to_netcdf)
+
+        # note: open_mfdataset() does not work because no monotonic indexes to concatenate along for SEAS5 hindcasts -> use loop
         filelist = list(path.glob(globpat))
-        logging.info("Reading multiple datasets:")
-        for file in tqdm(filelist):
+        for file in filelist:
             ds = xr.open_dataset(file, chunks="auto")
+            ds[var].encoding = {}  # delete encoing information before writing to_netcdf, now write uncompressed!
             datasets.append(ds)
 
-    logging.info("Cropping multiple datasets:")
-    for count, dataset in enumerate(tqdm(datasets)):
+    for count, dataset in enumerate(datasets):
         try:
             logging.info("\n Trying slice with dim names 'latitude'&'longitude'")
             ds_crop = dataset.sel({"latitude": y_slice}).sel({"longitude": x_slice})
@@ -80,10 +51,53 @@ def crop_netCDF(path, lat1, lat2, lon1, lon2, globpat=None, to_netcdf=False):
             logging.info("That didn't work. Trying slice with dim names 'lat'&'lon'")
             ds_crop = dataset.sel({"lat": y_slice}).sel({"lon": x_slice})
 
-        if to_netcdf:
-            filename = filelist[count].parts[-1][:-3] + "_box.nc"
+        if to_netcdf and globpat != None:
+            filename = filelist[count].parts[-1][:-3] + "_box.nc"  # exrtacting filenames from glob list only required for multiple files
             ds_crop.to_netcdf(cropped_path / filename)
-            logging.info(f"Wrote file {filename} to {cropped_path} \n")
+            logging.info(f"Wrote file {filename} to disk \n")
+
+        if to_netcdf and globpat == None:
+            filename = path.parts[-1][:-3] + "_box.nc"
+            ds_crop.to_netcdf(cropped_path / filename)
+            logging.info(f"Wrote file {filename} to disk\n")
+
+    return ds_crop if (to_netcdf == False and globpat == None) else None  # only return cropped dataset when a single file was provided
+
+def get_daily_tp_rate(path, outfolder, globpat=None, var="tp", to_netcdf=False):
+    path = Path(path)
+    outfolder = Path(outfolder)
+    _make_dir(outfolder, to_netcdf)
+
+    def helper(dataarray): #TODO define as private function?
+        da = dataarray.diff("time")  # attrs are dropped
+        da = xr.concat([dataarray.isel({"time": 0}), da], dim="time")  #carries over attrs from first element TODO could be the issue, carries over encoding?
+        da.attrs["units"] = "mm"
+        return da
+
+    if (globpat == None):  # single file
+        da = xr.open_dataset(path, chunks="auto")[var]
+        da = helper(da)
+        if to_netcdf:
+            filename = path.parts[-1][:-3] +"_disaggregated.nc"
+            da.to_netcdf(outfolder / filename)
+            logging.info(f"Wrote file {filename} to disk.")
+
+    else:  # list of files
+        dataarrays = []
+        files = list(path.glob(globpat))
+        logging.info(f"Reading and processing {len(files)}")
+        for file in files:
+            da = xr.open_dataset(file, chunks="auto")[var]
+            da = helper(da)
+            dataarrays.append(da)
+
+        if to_netcdf:
+            for c, dataarray in enumerate(dataarrays):
+                filename = files[c].parts[-1][:-3] + "_disaggregated.nc"
+                dataarray.to_netcdf(outfolder / filename)
+                logging.info(f"Wrote file {filename} to disk.")
+
+    return da if (globpat == None and to_netcdf==False) else None
 
 
 def ERA5_hourly_daily(path, globpat=None, to_netcdf=False):
@@ -111,9 +125,7 @@ def prep_hindcast(path, globpat, to_netcdf=False, filename="prepped_hindcast.nc"
     path = Path(path)
     outfolder = path / "climpred_hindcast"
     logging.info(f"Checking if {outfolder} exists.")
-    if not outfolder.exists() and to_netcdf:
-        outfolder.mkdir()
-        logging.info(f"Folder {outfolder} created.\n")
+    _make_dir(outfolder, to_netcdf)
 
     files = list(path.glob(globpat))
     logging.info(f"Processing {len(files)} files.")
@@ -134,3 +146,4 @@ def prep_hindcast(path, globpat, to_netcdf=False, filename="prepped_hindcast.nc"
         logging.info(f"Wrote {filename} to folder {outfolder} \n")
 
     return hc
+
