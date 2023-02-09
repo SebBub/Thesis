@@ -101,14 +101,14 @@ def get_daily_tp_rate(path, outfolder, globpat=None, var="tp", to_netcdf=False):
 
 
 def ERA5_hourly_daily(path, globpat=None, to_netcdf=False):
-    if globpat == None:
+    if globpat == None: #single file
         path = Path(path)
         ds = xr.open_dataset(path, chunks="auto")
         ds = ds.resample(time="1D").sum()  # aggregate hourly to daily
         if to_netcdf:
             ds.to_netcdf(path.parent / (path.parts[-1][:-3] + "_daily.nc"))
 
-    else:
+    else: # multiple files
         files = list(Path(path).glob(globpat))
         for file in files:
             ds = xr.open_dataset(file, chunks="auto")
