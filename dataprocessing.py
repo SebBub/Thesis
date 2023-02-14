@@ -147,3 +147,5 @@ def prep_hindcast(path, globpat, to_netcdf=False, filename="prepped_hindcast.nc"
 
     return hc
 
+# def
+# TODO:
